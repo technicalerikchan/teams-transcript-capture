@@ -37,6 +37,7 @@
     ],
     // A single caption line within the container.
     line: [
+      '.fui-ChatMessageCompact',
       '[data-tid="closed-caption-message"]',
       '.ui-chat__item',
       '[class*="captionMessage"]',
@@ -176,8 +177,13 @@
       const existing = entries.get(id);
       if (!existing) {
         entries.set(id, { speaker, text, order: ++orderCounter, tsMs: now });
+      } else if (existing.speaker && speaker && existing.speaker !== speaker) {
+        // Virtual-list recycled this node for a new speaker: freeze the old
+        // entry under a synthetic key, then start a fresh one.
+        entries.set("frozen-" + id + "-" + existing.order, { ...existing });
+        entries.set(id, { speaker, text, order: ++orderCounter, tsMs: now });
       } else {
-        // Caption lines grow/correct in place — keep the latest text.
+        // Caption line grows / corrects in place — keep the latest text.
         existing.speaker = speaker || existing.speaker;
         existing.text = text;
       }
