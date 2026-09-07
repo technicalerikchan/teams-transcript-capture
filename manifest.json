@@ -3,7 +3,9 @@
   "name": "Teams Transcript Capture",
   "version": "0.1.0",
   "description": "One-click capture of Microsoft Teams (web) live-caption transcripts, saved as Markdown into a synced OneDrive folder.",
-  "permissions": ["storage"],
+  "permissions": [
+    "storage"
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "Teams Transcript Capture"
@@ -13,9 +15,13 @@
       "matches": [
         "https://teams.microsoft.com/*",
         "https://*.teams.microsoft.com/*",
-        "https://teams.live.com/*"
+        "https://teams.live.com/*",
+        "https://teams.cloud.microsoft/*",
+        "https://*.cloud.microsoft/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ]
