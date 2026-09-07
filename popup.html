@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    body{width:260px;margin:0;padding:12px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;color:#222}
+    h1{font-size:14px;margin:0 0 8px}
+    .row{display:flex;justify-content:space-between;margin:4px 0}
+    .k{color:#666}
+    .v{font-weight:600}
+    .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+    .rec{background:#c62828}
+    .idle{background:#2e7d32}
+    .hint{margin-top:10px;padding:8px;background:#f3f3f3;border-radius:6px;color:#444;line-height:1.5}
+    code{background:#e8e8e8;padding:1px 4px;border-radius:3px}
+  </style>
+</head>
+<body>
+  <h1>Teams Transcript Capture</h1>
+  <div class="row"><span class="k">狀態</span><span class="v"><span id="dot" class="dot idle"></span><span id="state">閒置</span></span></div>
+  <div class="row"><span class="k">已擷取</span><span class="v" id="lines">0 行</span></div>
+  <div class="row"><span class="k">目標資料夾</span><span class="v" id="folder">尚未選擇</span></div>
+  <div class="row"><span class="k">最後檔案</span><span class="v" id="file">—</span></div>
+  <div class="hint">
+    用頁面右下角的浮動按鈕操作：<br />
+    ● <b>開始擷取</b> / ■ <b>停止並存檔</b><br />
+    📁 選擇 / 變更 OneDrive 資料夾<br />
+    ⚠️ 請先在 Teams 開啟 <b>live captions（即時字幕）</b>。
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>
