@@ -360,10 +360,13 @@
         font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
         background:#1f1f1f;color:#fff;border-radius:10px;padding:8px 10px;
         box-shadow:0 4px 16px rgba(0,0,0,.35);display:flex;align-items:center;gap:8px;
-        font-size:13px;user-select:none}
+        font-size:13px;user-select:none;box-sizing:border-box;max-width:100vw;
+        max-height:100vh;flex-wrap:wrap;overflow:auto}
       #ttc-widget button{cursor:pointer;border:0;border-radius:6px;padding:6px 10px;
         font-size:13px;font-weight:600;color:#fff;background:#3a3a3a}
       #ttc-widget button:hover{filter:brightness(1.15)}
+      #ttc-widget #ttc-drag{cursor:grab;touch-action:none;padding:6px;flex-shrink:0}
+      #ttc-widget #ttc-drag:active{cursor:grabbing}
       #ttc-toggle.rec{background:#c62828}
       #ttc-toggle.idle{background:#2e7d32}
       #ttc-folder{background:#3a3a3a}
@@ -377,6 +380,7 @@
     ui = document.createElement("div");
     ui.id = "ttc-widget";
     ui.innerHTML = `
+      <button id="ttc-drag" type="button" title="拖曳移動面板；方向鍵微調" aria-label="移動面板">⠿</button>
       <button id="ttc-toggle" class="idle">● 開始擷取</button>
       <span id="ttc-count">0 行</span>
       <button id="ttc-folder" title="選擇 / 變更 OneDrive 資料夾">📁</button>
@@ -385,6 +389,90 @@
     ui.querySelector("#ttc-toggle").addEventListener("click", () => (capturing ? stop() : start()));
     ui.querySelector("#ttc-folder").addEventListener("click", () => pickFolder());
     renderUI();
+    setupWidgetDragging();
+  }
+
+  function setupWidgetDragging() {
+    const handle = ui.querySelector("#ttc-drag");
+    const storageKey = "ttc_widget_position";
+    let drag = null;
+    let interacted = false;
+    let position = null;
+    let saveTimer = null;
+
+    const savePosition = () => {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(() => {
+        try {
+          chrome.storage.local.set({ [storageKey]: position }).catch(() => {});
+        } catch (_) {}
+      }, 150);
+    };
+    const moveTo = (left, top) => {
+      const bounds = ui.getBoundingClientRect();
+      const width = document.documentElement.clientWidth;
+      const height = document.documentElement.clientHeight;
+      position = {
+        left: Math.max(0, Math.min(left, width - bounds.width)),
+        top: Math.max(0, Math.min(top, height - bounds.height)),
+      };
+      ui.style.right = "auto";
+      ui.style.bottom = "auto";
+      ui.style.left = `${position.left}px`;
+      ui.style.top = `${position.top}px`;
+    };
+    const keepVisible = () => {
+      const bounds = ui.getBoundingClientRect();
+      const previous = position;
+      moveTo(bounds.left, bounds.top);
+      if (previous && (previous.left !== position.left || previous.top !== position.top)) {
+        savePosition();
+      }
+    };
+
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || !event.isPrimary || drag) return;
+      interacted = true;
+      const bounds = ui.getBoundingClientRect();
+      drag = { pointerId: event.pointerId, offsetX: event.clientX - bounds.left, offsetY: event.clientY - bounds.top };
+      handle.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      moveTo(event.clientX - drag.offsetX, event.clientY - drag.offsetY);
+    });
+    const endDrag = (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      drag = null;
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      keepVisible();
+      savePosition();
+    };
+    handle.addEventListener("pointerup", endDrag);
+    handle.addEventListener("pointercancel", endDrag);
+    handle.addEventListener("lostpointercapture", endDrag);
+    handle.addEventListener("keydown", (event) => {
+      const offsets = { ArrowLeft: [-10, 0], ArrowRight: [10, 0], ArrowUp: [0, -10], ArrowDown: [0, 10] };
+      const offset = offsets[event.key];
+      if (!offset) return;
+      event.preventDefault();
+      interacted = true;
+      const bounds = ui.getBoundingClientRect();
+      moveTo(bounds.left + offset[0], bounds.top + offset[1]);
+      savePosition();
+    });
+    window.addEventListener("resize", keepVisible);
+    new ResizeObserver(keepVisible).observe(ui);
+    keepVisible();
+    try {
+      chrome.storage.local.get(storageKey).then((result) => {
+        const saved = result[storageKey];
+        if (!interacted && Number.isFinite(saved?.left) && Number.isFinite(saved?.top)) {
+          moveTo(saved.left, saved.top);
+        }
+      }).catch(() => {});
+    } catch (_) {}
   }
 
   function renderUI() {
