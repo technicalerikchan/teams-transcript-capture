@@ -496,12 +496,71 @@
     ].join("\n");
   }
 
-  async function runBridge({ prompt }) {
+  /** Copilot bridge, hardened:
+   *  - clipboard: direct attempt; if blocked (no gesture / permission), retry
+   *    on the next click AND park the prompt in chrome.storage so a fresh page
+   *    can flush it (a dying meeting context kills both).
+   *  - tab: try the background worker first; if the message channel is dead
+   *    (context tearing down) fall back to window.open. */
+  async function runBridge({ prompt, attempts = 0 }) {
     let clipOk = false;
     try { await navigator.clipboard.writeText(prompt); clipOk = true; } catch (e) { log("clipboard blocked", e); }
-    try { chrome.runtime?.sendMessage({ type: "ttc-open-tab", url: copilotUrl }); } catch (_) {}
-    if (clipOk) toast("Copilot 分頁已開啟，prompt 已複製 — 貼上送出即可產生會議記錄");
-    else toast("Copilot 分頁已開啟。剪貼簿被擋：點一下頁面後會自動補複製");
+    let tabOk = false;
+    try {
+      const r = await Promise.race([
+        chrome.runtime?.sendMessage({ type: "ttc-open-tab", url: copilotUrl }),
+        new Promise((res) => setTimeout(() => res(null), 1500)),
+      ]);
+      tabOk = !!r?.ok;
+    } catch (_) { /* channel dead — context teardown */ }
+    if (!tabOk) {
+      try { window.open(copilotUrl, "_blank"); tabOk = true; } catch (_) {}
+    }
+    if (clipOk && tabOk) {
+      toast("Copilot 分頁已開啟，prompt 已複製 — 貼上送出即可產生會議記錄");
+      return;
+    }
+    // Park for gesture-flush / next-page-flush.
+    try {
+      await chrome.storage.local.set({ ttc_clip_prompt: prompt, ttc_clip_at: Date.now() });
+    } catch (_) {}
+    armPromptFlush();
+    toast(!tabOk ? "Copilot 分頁開啟失敗 — 點一下頁面重試；prompt 已暫存"
+                  : "剪貼簿被擋：prompt 已暫存，點一下頁面自動補複製");
+  }
+
+  /** One-click retry of a parked prompt (gesture unlocks the clipboard). */
+  function armPromptFlush() {
+    const flush = async () => {
+      window.removeEventListener("click", flush, true);
+      try {
+        const st = await chrome.storage.local.get(["ttc_clip_prompt"]);
+        const p = st.ttc_clip_prompt;
+        if (!p) return;
+        await navigator.clipboard.writeText(p);
+        await chrome.storage.local.remove("ttc_clip_prompt");
+        toast("prompt 已補複製 — 到 Copilot 分頁貼上送出");
+      } catch (e) { toast("補複製失敗：仍無剪貼簿權限"); }
+    };
+    window.addEventListener("click", flush, { capture: true, once: true });
+  }
+
+  /** On page load: if a prompt was parked (context died mid-bridge), copy it
+   *  automatically once the document is focusable; keeps the promise even if
+   *  the meeting tab is long gone. */
+  async function tryFlushPrompt() {
+    try {
+      const st = await chrome.storage.local.get(["ttc_clip_prompt", "ttc_clip_at"]);
+      const p = st.ttc_clip_prompt;
+      if (!p) return;
+      // Only auto-flush prompts younger than 24h; older ones stay until a click.
+      if (Date.now() - (st.ttc_clip_at || 0) > 24 * 3600 * 1000) return;
+      try {
+        await navigator.clipboard.writeText(p);
+        await chrome.storage.local.remove("ttc_clip_prompt");
+        toast("已補複製上次的會議記錄 prompt — 到 Copilot 貼上送出");
+      } catch (_) { armPromptFlush(); }
+    } catch (_) {}
   }
 
   // ---------------------------------------------------------------------------
@@ -968,7 +1027,6 @@
     }
     t.textContent = msg;
     t.style.opacity = "1";
-    clearTimeout(toastTimer);
     toastTimer = setTimeout(() => (t.style.opacity = "0"), 4000);
     log(msg);
   }
@@ -1006,7 +1064,7 @@
       if (res && typeof res.ttc_copilot_url === "string" && res.ttc_copilot_url) copilotUrl = res.ttc_copilot_url;
     } catch (_) {}
     updateStatus();
-    if (isTop) tryFlushParked();
+    if (isTop) { tryFlushParked(); tryFlushPrompt(); }
   })();
 
   const boot = () => { if (document.body) injectUI(); else setTimeout(boot, 500); };
