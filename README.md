@@ -8,8 +8,7 @@
 - **上一場不污染下一場**：每場會議開始時清空跨 frame 彙整區；未存檔的逐字稿暫存於 chrome.storage，不會混入下一場。
 - **會議感知命名**：1:1 會議以對方名字命名（`人名_日期_時間.md`），多人會議以會議標題命名。
 - **雙租戶路由**：依頁面登入帳號（REMOVED / REMOVED）自動寫入對應租戶的資料夾；**每個租戶第一次必須按 📁 各授權一次**（會議中就會提醒）。
-- **Copilot 橋**：存檔後自動開 `m365.cloud.microsoft/chat` 新分頁，會議記錄 prompt 已在剪貼簿，貼上送出即可（輸出：Summary / Decisions / Action Items / Open Questions，英文；minutes 請存到同資料夾的 `minutes/`）。
-- **未授權也不丟稿**：存檔被權限卡住時逐字稿暫存於 chrome.storage，下次開 Teams 頁面點一下即自動補存。
+- **Copilot 全自動（v0.3）**：存檔後自動開 Copilot 分頁，**自動貼上 prompt 並按送出**（紫色角落徽章顯示進度；失敗自動重試 5 次，仍失敗退回「剪貼簿+手動貼上」模式）。minutes 生成後請存到同資料夾的 `minutes/`。
 - **🔍 診斷**：若行數 0 或行為異常，按 🔍 會把 DOM 結構報告複製到剪貼簿（並印在 console），貼給 Claude 校正 selector。
 
 ## 安裝（load unpacked）

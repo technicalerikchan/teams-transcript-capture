@@ -496,15 +496,26 @@
     ].join("\n");
   }
 
-  /** Copilot bridge, hardened:
-   *  - clipboard: direct attempt; if blocked (no gesture / permission), retry
-   *    on the next click AND park the prompt in chrome.storage so a fresh page
-   *    can flush it (a dying meeting context kills both).
-   *  - tab: try the background worker first; if the message channel is dead
-   *    (context tearing down) fall back to window.open. */
-  async function runBridge({ prompt, attempts = 0 }) {
-    let clipOk = false;
-    try { await navigator.clipboard.writeText(prompt); clipOk = true; } catch (e) { log("clipboard blocked", e); }
+  /** AUTO-PASTE mode: instead of clipboard hand-off, park the prompt and let
+   *  the COPILOT TAB itself inject + send it. The Copilot page is a different
+   *  origin, so this content script must ALSO run there (manifest match) and
+   *  pick the parked prompt up. Flow:
+   *    meeting tab: save transcript -> park prompt (chrome.storage) -> open tab
+   *    copilot tab: ttc-copilot.js sees parked prompt -> injects into Lexical
+   *                 editor -> clicks Send -> parks nothing, done. */
+  async function runBridge({ prompt }) {
+    // 1) Park the prompt for the Copilot tab to pick up (survives context death).
+    try {
+      await chrome.storage.local.set({
+        ttc_autopaste: { prompt, at: Date.now(), title: meetingTitle || "" },
+      });
+    } catch (e) {
+      log("park failed", e);
+      toast("無法暫存 prompt（storage 錯誤）— 逐字稿已存檔");
+    }
+    // 2) Keep a clipboard copy as belt-and-braces (harmless if blocked).
+    try { await navigator.clipboard.writeText(prompt); } catch (_) {}
+    // 3) Open the Copilot tab (worker first, window.open fallback).
     let tabOk = false;
     try {
       const r = await Promise.race([
@@ -512,21 +523,12 @@
         new Promise((res) => setTimeout(() => res(null), 1500)),
       ]);
       tabOk = !!r?.ok;
-    } catch (_) { /* channel dead — context teardown */ }
+    } catch (_) {}
     if (!tabOk) {
       try { window.open(copilotUrl, "_blank"); tabOk = true; } catch (_) {}
     }
-    if (clipOk && tabOk) {
-      toast("Copilot 分頁已開啟，prompt 已複製 — 貼上送出即可產生會議記錄");
-      return;
-    }
-    // Park for gesture-flush / next-page-flush.
-    try {
-      await chrome.storage.local.set({ ttc_clip_prompt: prompt, ttc_clip_at: Date.now() });
-    } catch (_) {}
-    armPromptFlush();
-    toast(!tabOk ? "Copilot 分頁開啟失敗 — 點一下頁面重試；prompt 已暫存"
-                  : "剪貼簿被擋：prompt 已暫存，點一下頁面自動補複製");
+    toast(tabOk ? "已開啟 Copilot 分頁 — 全自動貼上+送出中，完成後會通知"
+                : "Copilot 分頁開啟失敗 — 請手動開啟 m365.cloud.microsoft/chat");
   }
 
   /** One-click retry of a parked prompt (gesture unlocks the clipboard). */
