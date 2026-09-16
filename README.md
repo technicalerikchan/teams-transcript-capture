@@ -1,10 +1,16 @@
 # Teams Transcript Capture
 
-一個極簡的 Chrome 擴充（MV3），一鍵擷取**網頁版 Microsoft Teams** 的即時字幕（live captions），停止後自動把逐字稿存成 Markdown，寫進你指定的 **OneDrive 同步資料夾**，由 OneDrive 自動上傳到雲端。
+一個極簡的 Chrome 擴充（MV3），**自動**擷取**網頁版 Microsoft Teams** 的即時字幕（live captions），會議結束自動把逐字稿存成 Markdown，寫進你指定的 **OneDrive 同步資料夾**，由 OneDrive 自動上傳到雲端；存檔後自動開啟 M365 Copilot 分頁並複製會議記錄 prompt，貼上送出即得英文會議記錄。
 
 - 只抓**文字**（字幕），不錄音、不錄影。
-- 不使用 Graph API / OAuth / 租戶 —— 靠「寫進本機已同步的 OneDrive 資料夾」達成上傳。
-- 目標資料夾範例：`~/Library/CloudStorage/REMOVED/...`
+- **AUTO 模式**（預設開）：偵測到進入會議 → 自動開字幕、自動開始擷取；偵測到離開 → 自動存檔。
+- **跨 frame / Shadow DOM**：字幕在 iframe 或 shadow root 裡也抓得到（各 frame 經 background 彙整，任一 frame 都能完成存檔）。
+- **上一場不污染下一場**：每場會議開始時清空跨 frame 彙整區；未存檔的逐字稿暫存於 chrome.storage，不會混入下一場。
+- **會議感知命名**：1:1 會議以對方名字命名（`人名_日期_時間.md`），多人會議以會議標題命名。
+- **雙租戶路由**：依頁面登入帳號（REMOVED / REMOVED）自動寫入對應租戶的資料夾；**每個租戶第一次必須按 📁 各授權一次**（會議中就會提醒）。
+- **Copilot 橋**：存檔後自動開 `m365.cloud.microsoft/chat` 新分頁，會議記錄 prompt 已在剪貼簿，貼上送出即可（輸出：Summary / Decisions / Action Items / Open Questions，英文；minutes 請存到同資料夾的 `minutes/`）。
+- **未授權也不丟稿**：存檔被權限卡住時逐字稿暫存於 chrome.storage，下次開 Teams 頁面點一下即自動補存。
+- **🔍 診斷**：若行數 0 或行為異常，按 🔍 會把 DOM 結構報告複製到剪貼簿（並印在 console），貼給 Claude 校正 selector。
 
 ## 安裝（load unpacked）
 

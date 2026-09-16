@@ -1,11 +1,15 @@
 {
   "manifest_version": 3,
   "name": "Teams Transcript Capture",
-  "version": "0.1.0",
-  "description": "One-click capture of Microsoft Teams (web) live-caption transcripts, saved as Markdown into a synced OneDrive folder.",
+  "version": "0.2.1",
+  "description": "Auto-capture of Microsoft Teams (web) live-caption transcripts: auto start/stop, meeting-aware naming, dual-tenant OneDrive routing, M365 Copilot minutes bridge.",
   "permissions": [
-    "storage"
+    "storage",
+    "tabs"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "Teams Transcript Capture"
