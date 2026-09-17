@@ -224,7 +224,7 @@
     const a = document.createElement("a");
     a.href = url;
     a.download = name;
-    document.body.appendChild(a);
+    (document.body || document.documentElement).appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
@@ -671,53 +671,103 @@
   /** On every Teams page load: if a parked transcript exists, ask the user
    *  (one click grants the gesture) to flush it. */
   async function tryFlushParked() {
+    // document_start: <body> may not exist yet; defer until DOM is interactive
+    // so toast() (which the flush prompt depends on) can render.
+    if (!document.body) {
+      await new Promise((res) => {
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", res, { once: true });
+        } else {
+          setTimeout(res, 300);
+        }
+      });
+    }
     try {
       const st = await chrome.storage.local.get("ttc_pending");
       const p = st.ttc_pending;
       if (!p || !p.name) return;
-      const key = p.tenantKey || tenantKeyNow();
-      const handle = handles.get(key) || (await idbGet(storeKeyFor(key)));
-      if (handle && (await handle.queryPermission({ mode: "readwrite" })) === "granted") {
-        await writeFile(handle, p.name, p.content);
-        await chrome.storage.local.remove("ttc_pending");
-        toast(`已補存上次的逐字稿：${p.name}`);
-        runBridge({ prompt: p.prompt });
-        return;
-      }
-      toast("有上次未存檔的逐字稿 — 點一下頁面以授權補存");
-      const flush = async () => {
-        window.removeEventListener("click", flush, true);
-        try {
-          const h = handles.get(key) || (await ensureFolderFor(key, false));
-          await writeFile(h, p.name, p.content);
-          await chrome.storage.local.remove("ttc_pending");
-          toast(`已補存：${p.name}`);
-          runBridge({ prompt: p.prompt });
-        } catch (e) { toast(`補存失敗：${e.message || e}`); }
-      };
-      window.addEventListener("click", flush, { capture: true, once: true });
+      toast("有上次未存檔的逐字稿 — 按「💾 補存」按鈕存檔");
     } catch (_) {}
+  }
+
+  /** Shared flush: the ONLY place that disposes a parked transcript.
+   *  Layer 1: current handle (fresh grant or remembered).
+   *  Layer 2: requestPermission on the stale handle (same gesture).
+   *  Layer 3: re-pick folder (same gesture).
+   *  Layer 4: download to ~/Downloads — never fails, always ends with the
+   *  bytes somewhere on disk. */
+  async function flushParkedCore() {
+    const act = () => {
+      try { return `activation=${navigator.userActivation ? navigator.userActivation.isActive : "n/a"}`; }
+      catch (_) { return "activation=?"; }
+    };
+    let p = null;
+    try {
+      p = (await chrome.storage.local.get("ttc_pending")).ttc_pending;
+    } catch (_) {}
+    if (!p || !p.name) { toast("沒有待補存的逐字稿"); return; }
+    const key = p.tenantKey || tenantKeyNow();
+    log("flush start", p.name, `folder=${handles.get(key)?.name || "?"}`, act());
+    // Chromium's FSA broker refuses getFileHandle(create:true) on macOS File
+    // Provider mounts (~/Library/CloudStorage/OneDrive...): NotAllowedError
+    // regardless of grant state, with active gesture and a valid handle
+    // (confirmed on this machine 2026-09-17: OS-level write works, FSA write
+    // fails; requestPermission never resolves). So: download channel FIRST —
+    // it bypasses the broker entirely and always lands in ~/Downloads.
+    try {
+      downloadFallback(p.name, p.content);
+      log("downloaded via <a download> channel");
+      await chrome.storage.local.remove("ttc_pending");
+      toast(`已下載：${p.name}（在「下載」資料夾）— 請搬進 OneDrive/transcript，或按 📁 重選本機資料夾`);
+      runBridge({ prompt: p.prompt });
+      renderUI();
+      return;
+    } catch (e0) { log("download channel failed", e0); }
+    // Download blocked (rare): fall back to FSA attempts.
+    try {
+      const h = handles.get(key) || (await idbGet(storeKeyFor(key)));
+      if (h) {
+        try {
+          await writeFile(h, p.name, p.content);
+          await afterFlush(p);
+          return;
+        } catch (e1) { log("layer1 write failed", e1); }
+        try {
+          const granted = (await h.requestPermission({ mode: "readwrite" })) === "granted";
+          log("layer2 requestPermission ->", granted, act());
+          if (granted) {
+            await writeFile(h, p.name, p.content);
+            await afterFlush(p);
+            return;
+          }
+        } catch (e2) { log("layer2 requestPermission failed", e2); }
+      }
+      const h2 = await ensureFolderFor(key, true);
+      log("layer3 picked", h2.name, act());
+      await writeFile(h2, p.name, p.content);
+      await afterFlush(p);
+    } catch (e) {
+      log("flushParkedCore fallback error", e);
+      toast(`補存失敗：${e.message || e}`);
+    }
+  }
+
+  async function afterFlush(p) {
+    await chrome.storage.local.remove("ttc_pending");
+    toast(`已存檔：${p.name}`);
+    lastFile = p.name;
+    updateStatus(true);
+    runBridge({ prompt: p.prompt });
+    renderUI();
   }
 
   /** One-click gesture flush for a write deferred during this page's life. */
   function armGestureFlush() {
-    const flush = async () => {
+    const flush = () => {
       window.removeEventListener("click", flush, true);
-      try {
-        const st = await chrome.storage.local.get("ttc_pending");
-        const p = st.ttc_pending;
-        if (!p) return;
-        const h = await ensureFolderFor(p.tenantKey, false);
-        await writeFile(h, p.name, p.content);
-        await chrome.storage.local.remove("ttc_pending");
-        toast(`已存檔：${p.name}`);
-        runBridge({ prompt: p.prompt });
-        lastFile = p.name;
-        renderUI();
-      } catch (e) {
-        toast(`存檔失敗：${e.message || e}`);
-      }
+      flushParkedCore();
     };
+    window.addEventListener("click", flush, { capture: true, once: true });
   }
 
   async function pickFolder() {
@@ -899,12 +949,14 @@
       <button id="ttc-auto" class="on" type="button" title="AUTO：進會議自動擷取、結束自動存檔">AUTO</button>
       <button id="ttc-toggle" class="idle">● 開始擷取</button>
       <span id="ttc-count">0 行</span>
+      <button id="ttc-flush" type="button" title="補存上次未存檔的逐字稿" style="display:none;background:#e65100">💾 補存</button>
       <button id="ttc-folder" title="選擇 / 變更此帳號的 OneDrive 資料夾">📁</button>
       <button id="ttc-diag" type="button" title="診斷：DOM 結構報告（校正 selector 用）">🔍</button>
       <span id="ttc-tenant" title="偵測到的登入帳號"></span>
     `;
     document.body.appendChild(ui);
     ui.querySelector("#ttc-toggle").addEventListener("click", () => (capturing ? stop(false) : start(false)));
+    ui.querySelector("#ttc-flush").addEventListener("click", () => flushParkedCore());
     ui.querySelector("#ttc-folder").addEventListener("click", () => pickFolder());
     ui.querySelector("#ttc-diag").addEventListener("click", () => runDiagnostics());
     ui.querySelector("#ttc-auto").addEventListener("click", () => {
@@ -1000,7 +1052,7 @@
     } catch (_) {}
   }
 
-  function renderUI() {
+  async function renderUI() {
     if (!ui) return;
     const btn = ui.querySelector("#ttc-toggle");
     const cnt = ui.querySelector("#ttc-count");
@@ -1016,6 +1068,11 @@
     autoBtn.className = autoMode ? "on" : "off";
     autoBtn.textContent = autoMode ? "AUTO" : "MANUAL";
     cnt.textContent = `${entries.size + bgLineCount} 行`;
+    // Visible affordance: a parked transcript exists and still needs a home.
+    let hasPending = false;
+    try { hasPending = !!(await chrome.storage.local.get("ttc_pending")).ttc_pending; } catch (_) {}
+    const flushBtn = ui.querySelector("#ttc-flush");
+    if (flushBtn) flushBtn.style.display = hasPending ? "" : "none";
     tenantEl.textContent = tenantEmail || "";
   }
 
@@ -1025,7 +1082,8 @@
     if (!t) {
       t = document.createElement("div");
       t.id = "ttc-toast";
-      document.body.appendChild(t);
+      // document_start has no <body> yet; documentElement keeps position:fixed working.
+      (document.body || document.documentElement).appendChild(t);
     }
     t.textContent = msg;
     t.style.opacity = "1";
