@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Teams Transcript Capture",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Auto-capture of Microsoft Teams (web) live-caption transcripts: auto start/stop, meeting-aware naming, dual-tenant OneDrive routing, fully-automatic M365 Copilot minutes (auto-paste + send).",
   "permissions": [
     "storage",
