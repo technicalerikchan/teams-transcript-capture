@@ -29,11 +29,11 @@ Arc 沒有供此擴充功能使用的 workspace 名稱 API，設定是儲存在 
 
 ### 安裝本機寫檔程式
 
-擴充功能 ID 可在 `chrome://extensions` 的開發人員模式下取得。本目錄在此機的 ID 為 `klhggdgabghfgeaapigeihkmmeinjokn`。
+擴充功能 ID 可在 `chrome://extensions` 的開發人員模式下取得。（ID 會依安裝而異，以 `chrome://extensions` 顯示的為準）
 
 ```bash
 cd /Users/Erik.Chan/Desktop/teams-transcript-capture-main
-python3 native/install.py --extension-id klhggdgabghfgeaapigeihkmmeinjokn
+python3 native/install.py --extension-id <你的擴充功能ID>
 ```
 
 安裝位置：`~/.local/share/teams-transcript-capture/`。安裝程式在使用者層級的 Arc／Chrome NativeMessagingHosts 目錄註冊 host，不會修改瀏覽器 profile 設定。若搬動擴充功能資料夾導致 ID 改變，請重新安裝 host，指定新 ID。
