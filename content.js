@@ -1,5 +1,6 @@
 /*
- * Teams Transcript Capture — content script (v0.2.1)
+ * Teams Transcript Capture — content script
+ * v0.4.0: profile/account routing and a local native OneDrive writer.
  * ---------------------------------------------------
  * v0.2.1 fixes from the first AUTO test (user report: widget showed 0 lines
  * while captions were visibly streaming; no save, no Copilot tab):
@@ -21,6 +22,9 @@
   window.__ttcLoaded = true;
 
   const log = (...a) => console.log("[TTC]", ...a);
+  const VERSION = chrome.runtime.getManifest().version;
+  const loadedAt = new Date().toISOString();
+  let lastSaveResult = null;
 
   // ---------------------------------------------------------------------------
   // Selectors (calibrate against live Teams DOM if needed)
@@ -64,12 +68,20 @@
       '#hangup-button',
       '[data-tid="hangup-button"]',
       '[data-tid="call-controls"]',
-      // Teams 2.0: control bar container classes.
+      // Teams tenants can render localized / version-specific controls.
+      '[data-tid*="call-control" i]',
+      '[data-tid*="hangup" i]',
       '[class*="callControl" i]',
       '[class*="controlbar" i]',
       'button[data-tid*="hangup" i]',
       'button[aria-label*="leave" i]',
-      'button[aria-label*="掛斷" i]',
+      'button[aria-label*="hang up" i]',
+      'button[aria-label*="離開會議"]',
+      'button[aria-label*="離開通話"]',
+      'button[aria-label*="結束會議"]',
+      'button[aria-label*="結束通話"]',
+      'button[aria-label*="掛斷"]',
+      'button[aria-label*="離開"]',
     ],
     captionsBtn: [
       '[data-tid="closed-caption-button"]',
@@ -77,7 +89,10 @@
       '[data-tid="closed-caption-toggle"]',
       'button[data-tid*="caption" i]',
       'button[aria-label*="caption" i]',
+      'button[title*="caption" i]',
+      'button[aria-label*="即時字幕"]',
       'button[aria-label*="字幕"]',
+      'button[title*="字幕"]',
     ],
     rosterBtn: [
       '[data-tid="roster-button"]',
@@ -153,71 +168,33 @@
   const frameContainers = []; // same-origin caption containers found in iframes
 
   // ---------------------------------------------------------------------------
-  // IndexedDB: persist folder handles per tenant + settings
+  // Profile-local OneDrive routing, executed by the native writer
   // ---------------------------------------------------------------------------
-  const DB_NAME = "ttc-db";
-  const STORE = "handles";
-  const openDB = () => new Promise((res, rej) => {
-    const r = indexedDB.open(DB_NAME, 1);
-    r.onupgradeneeded = () => r.result.createObjectStore(STORE);
-    r.onsuccess = () => res(r.result);
-    r.onerror = () => rej(r.error);
-  });
-  const idbGet = async (k) => {
-    const db = await openDB();
-    return new Promise((res, rej) => {
-      const t = db.transaction(STORE, "readonly").objectStore(STORE).get(k);
-      t.onsuccess = () => res(t.result);
-      t.onerror = () => rej(t.error);
-    });
-  };
-  const idbSet = async (k, v) => {
-    const db = await openDB();
-    return new Promise((res, rej) => {
-      const t = db.transaction(STORE, "readwrite").objectStore(STORE).put(v, k);
-      t.onsuccess = () => res();
-      t.onerror = () => rej(t.error);
-    });
-  };
-
-  // ---------------------------------------------------------------------------
-  // Folder handles (File System Access API), one per tenant
-  // ---------------------------------------------------------------------------
-  const handles = new Map(); // tenantKey -> FileSystemDirectoryHandle
+  const { ROUTES, validRoute, resolveRoute, pendingKey, pendingItems } = TtcRouting;
+  let routeSelection = "auto";
+  let captureRoute = null;
+  let captureTenant = null;
+  const routeNow = () => capturing ? captureRoute : resolveRoute(routeSelection, tenantKeyNow());
+  const folderNow = () => ROUTES[routeNow()]?.folder || "請選擇 CDK / Tao";
+  const getPending = async () => pendingItems(await chrome.storage.local.get(null));
   let copilotUrl = "https://m365.cloud.microsoft/chat";
 
-  const fsaSupported = () => typeof window.showDirectoryPicker === "function";
-
-  const storeKeyFor = (tenantKey) => "dir:" + tenantKey;
-
-  async function ensureFolderFor(tenantKey, forcePick) {
-    let handle = forcePick ? null : handles.get(tenantKey);
-    if (!handle) {
-      const legacy = !forcePick && (await idbGet("dir")); // v0.1 single-folder migration
-      if (legacy && (await legacy.queryPermission({ mode: "readwrite" })) === "granted") {
-        handle = legacy;
-      } else {
-        handle = await window.showDirectoryPicker({ mode: "readwrite", startIn: "documents" });
-      }
-    }
-    let perm = await handle.queryPermission({ mode: "readwrite" });
-    if (perm !== "granted") {
-      perm = await handle.requestPermission({ mode: "readwrite" });
-      if (perm !== "granted") throw new Error("資料夾寫入權限被拒");
-    }
-    handles.set(tenantKey, handle);
-    await idbSet(storeKeyFor(tenantKey), handle);
-    return handle;
+  // Persist metadata only: diagnostics must not include transcript/prompt bodies.
+  async function recordSaveResult(state, pending, error = null) {
+    lastSaveResult = {
+      state,
+      at: new Date().toISOString(),
+      file: pending.name || null,
+      tenantKey: pending.tenantKey,
+      route: pending.route || null,
+      folder: pending.destination?.replace(/\/[^/]+$/, "") || ROUTES[pending.route]?.folder || null,
+      error: error ? { name: error.name || "Error", message: String(error.message || error) } : null,
+    };
+    try { await chrome.storage.local.set({ ttc_last_save: lastSaveResult }); }
+    catch (e) { log("save diagnostics persistence failed", e); }
   }
 
-  async function writeFile(handle, name, content) {
-    const fh = await handle.getFileHandle(name, { create: true });
-    const w = await fh.createWritable();
-    await w.write(content);
-    await w.close();
-  }
-
-  /** Fallback if FSA fails: download via a blob link (lands in Downloads). */
+  /** A blob link requests a download; it cannot confirm that a file was saved. */
   function downloadFallback(name, content) {
     const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
     const url = URL.createObjectURL(blob);
@@ -238,21 +215,33 @@
   const SELF_MARKERS = ["(你)", "(You)", "(來賓)", "(Guest)"];
 
   function detectTenant() {
+    // Participants and arbitrary cached emails are not signed-in accounts.
+    let detected = "";
     for (const el of deepQueryAll(document, 'button[aria-label], [role="button"][aria-label]')) {
-      const m = (el.getAttribute("aria-label") || "").match(EMAIL_RE);
-      if (m) { tenantEmail = m[0]; break; }
+      const label = el.getAttribute("aria-label") || "";
+      if (!/account|profile|me-control|mecontrol|帳戶|帳號|個人資料/i.test(`${el.getAttribute("data-tid") || ""} ${label}`)) continue;
+      const m = label.match(EMAIL_RE);
+      if (m) { detected = m[0]; break; }
     }
-    if (!tenantEmail) {
+    if (!detected) {
+      const accounts = new Set();
       try {
-        for (let i = 0; i < localStorage.length && i < 500; i++) {
-          const k = localStorage.key(i);
-          const v = String(localStorage.getItem(k) || "");
-          const m = v.match(EMAIL_RE);
-          if (m && v.length < 4000) { tenantEmail = m[0]; break; }
+        for (const store of [localStorage, sessionStorage]) {
+          for (let i = 0; i < store.length && i < 500; i++) {
+            const key = store.key(i);
+            if (!/msal.*account\.keys$/i.test(key)) continue;
+            const keys = JSON.parse(store.getItem(key) || "[]");
+            if (!Array.isArray(keys)) continue;
+            for (const accountKey of keys) {
+              const account = JSON.parse(store.getItem(accountKey) || "null");
+              if (account?.username && EMAIL_RE.test(account.username)) accounts.add(account.username.toLowerCase());
+            }
+          }
         }
       } catch (_) {}
+      if (accounts.size === 1) detected = [...accounts][0];
     }
-    if (tenantEmail) log("tenant:", tenantEmail);
+    tenantEmail = detected;
     return tenantKeyNow();
   }
   const tenantKeyNow = () => (tenantEmail ? tenantEmail.split("@")[1].toLowerCase() : "default");
@@ -272,15 +261,29 @@
   const isInMeetingRaw = () =>
     !!pickOne(document, SEL.container) ||
     !!pickOne(document, SEL.meetControl);
+  function findCaptionsButton() {
+    const direct = pickOne(document, SEL.captionsBtn);
+    if (direct) return direct;
+    // Teams tenants/locales sometimes expose the captions control only through
+    // its visible text or title, with no stable data-tid / aria-label.
+    const re = /live captions?|closed captions?|captions?|subtitles?|即時字幕|字幕/i;
+    return deepQueryAll(document, 'button, [role="button"]')
+      .filter((el) => {
+        const label = [el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("data-tid"), el.innerText, el.textContent]
+          .filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+        return re.test(label) && el.getClientRects().length > 0;
+      })[0] || null;
+  }
+
   async function tryEnableCaptions() {
     if (findContainer() || frameContainers.length) return true;
     if (captionsTried >= 3) return false;
-    const btn = pickOne(document, SEL.captionsBtn);
+    const btn = findCaptionsButton();
     if (!btn) return false;
     if (btn.getAttribute("aria-pressed") === "true") return true;
     btn.click();
     captionsTried++;
-    log("clicked captions toggle", btn.getAttribute("data-tid") || btn.getAttribute("aria-label"));
+    log("clicked captions toggle", btn.getAttribute("data-tid") || btn.getAttribute("aria-label") || btn.getAttribute("title") || btn.innerText);
     return true;
   }
 
@@ -589,10 +592,13 @@
   }
 
   async function start(fromAuto) {
-    if (!fsaSupported()) {
-      toast("此瀏覽器不支援 File System Access API，請用桌面版 Chrome / Arc。");
-      return;
-    }
+    detectTenant();
+    captureTenant = tenantKeyNow();
+    try {
+      const resolved = await chrome.runtime.sendMessage({ type: "ttc-get-route", tenantKey: captureTenant });
+      captureRoute = resolved?.route || null;
+      if (resolved?.selection) routeSelection = resolved.selection;
+    } catch (_) { captureRoute = resolveRoute(routeSelection, captureTenant); }
     // Fresh meeting: drop lines left in the background aggregate so the
     // previous meeting's captions can never leak into this transcript.
     try { await chrome.storage.local.set({ ttc_bg_lines: [], ttc_bg_count: 0 }); } catch (_) {}
@@ -617,9 +623,9 @@
   }
 
   async function stop(fromAuto) {
+    scan(); // scan() requires capturing=true; flush before stopping the observer
     capturing = false;
     detachObserver();
-    scan(); // final flush of anything still in this frame's DOM
     collectParticipants();
     if (!meetingTitle) meetingTitle = getMeetingTitle();
     const list = await buildFinalLines();
@@ -630,42 +636,35 @@
       return;
     }
     const md = buildMarkdown(list);
-    const name = buildFilename();
-    const tenantKey = tenantKeyNow();
-    const prompt = buildPrompt(md);
-    const handle = handles.get(tenantKey);
-    let saved = false;
+    const pending = {
+      id: crypto.randomUUID(), name: buildFilename(), content: md,
+      tenantKey: captureTenant || tenantKeyNow(), route: captureRoute,
+      prompt: buildPrompt(md), savedAt: Date.now(),
+    };
+    await savePending(pending);
+  }
+
+  async function savePending(pending) {
+    let parked = false;
     try {
-      if (handle && (await handle.queryPermission({ mode: "readwrite" })) === "granted") {
-        await writeFile(handle, name, md);
-        saved = true;
-        try { await handle.getDirectoryHandle("minutes", { create: true }); } catch (_) {}
-      } else {
-        // Defer to a gesture now; ALSO park in chrome.storage so the next
-        // Teams page load can flush it even if this tab dies (SPA teardown).
-        await chrome.storage.local.set({
-          ttc_pending: {
-            name, content: md, tenantKey, prompt,
-            savedAt: Date.now(),
-          },
-        });
-        armGestureFlush();
-        toast("逐字稿已暫存 — 點一下頁面以授權存檔（離開也不會丟，下次開頁自動補存）");
-      }
-      if (saved) toast(`已存檔：${name}（OneDrive 將自動同步）`);
-    } catch (e) {
-      log("write failed, falling back to download", e);
-      downloadFallback(name, md);
-      toast(`寫入資料夾失敗，已改用下載：${e.message || e}`);
-    }
-    if (saved) {
-      lastFile = name;
-      // Clear the bg aggregate once safely written.
+      await chrome.storage.local.set({ [pendingKey(pending)]: pending });
+      parked = true;
+      await recordSaveResult("writing", pending);
+      const result = await chrome.runtime.sendMessage({ type: "ttc-save-transcript", pending });
+      if (validRoute(result?.route)) pending.route = result.route;
+      if (!result?.ok || typeof result.path !== "string") throw new Error(result?.error || "本機寫檔程式未回應");
+      await recordSaveResult("saved", { ...pending, route: result.route, destination: result.path });
+      lastFile = result.path.split("/").pop();
+      toast(`已存入 ${ROUTES[result.route]?.label || result.route} OneDrive：${lastFile}`);
       try { await chrome.storage.local.set({ ttc_bg_lines: [], ttc_bg_count: 0 }); } catch (_) {}
-      runBridge({ prompt });
+      updateStatus(true);
+      if (pending.prompt) runBridge({ prompt: pending.prompt });
+    } catch (error) {
+      await recordSaveResult("native-write-failed", pending, error);
+      toast(`${error.message}。${parked ? "暫存保留，請按 💾 補存。" : "暫存失敗，請勿關閉分頁。"}`);
+      updateStatus(false);
     }
     renderUI();
-    updateStatus(saved);
   }
 
   /** On every Teams page load: if a parked transcript exists, ask the user
@@ -683,102 +682,31 @@
       });
     }
     try {
-      const st = await chrome.storage.local.get("ttc_pending");
-      const p = st.ttc_pending;
-      if (!p || !p.name) return;
-      toast("有上次未存檔的逐字稿 — 按「💾 補存」按鈕存檔");
+      const pending = await getPending();
+      if (pending.length) toast(`有 ${pending.length} 份未存檔的逐字稿 — 按「💾 補存」逐一存入原目的地`);
     } catch (_) {}
   }
 
-  /** Shared flush: the ONLY place that disposes a parked transcript.
-   *  Layer 1: current handle (fresh grant or remembered).
-   *  Layer 2: requestPermission on the stale handle (same gesture).
-   *  Layer 3: re-pick folder (same gesture).
-   *  Layer 4: download to ~/Downloads — never fails, always ends with the
-   *  bytes somewhere on disk. */
   async function flushParkedCore() {
-    const act = () => {
-      try { return `activation=${navigator.userActivation ? navigator.userActivation.isActive : "n/a"}`; }
-      catch (_) { return "activation=?"; }
-    };
-    let p = null;
-    try {
-      p = (await chrome.storage.local.get("ttc_pending")).ttc_pending;
-    } catch (_) {}
-    if (!p || !p.name) { toast("沒有待補存的逐字稿"); return; }
-    const key = p.tenantKey || tenantKeyNow();
-    log("flush start", p.name, `folder=${handles.get(key)?.name || "?"}`, act());
-    // Chromium's FSA broker refuses getFileHandle(create:true) on macOS File
-    // Provider mounts (~/Library/CloudStorage/OneDrive...): NotAllowedError
-    // regardless of grant state, with active gesture and a valid handle
-    // (confirmed on this machine 2026-09-17: OS-level write works, FSA write
-    // fails; requestPermission never resolves). So: download channel FIRST —
-    // it bypasses the broker entirely and always lands in ~/Downloads.
-    try {
-      downloadFallback(p.name, p.content);
-      log("downloaded via <a download> channel");
-      await chrome.storage.local.remove("ttc_pending");
-      toast(`已下載：${p.name}（在「下載」資料夾）— 請搬進 OneDrive/transcript，或按 📁 重選本機資料夾`);
-      runBridge({ prompt: p.prompt });
-      renderUI();
-      return;
-    } catch (e0) { log("download channel failed", e0); }
-    // Download blocked (rare): fall back to FSA attempts.
-    try {
-      const h = handles.get(key) || (await idbGet(storeKeyFor(key)));
-      if (h) {
-        try {
-          await writeFile(h, p.name, p.content);
-          await afterFlush(p);
-          return;
-        } catch (e1) { log("layer1 write failed", e1); }
-        try {
-          const granted = (await h.requestPermission({ mode: "readwrite" })) === "granted";
-          log("layer2 requestPermission ->", granted, act());
-          if (granted) {
-            await writeFile(h, p.name, p.content);
-            await afterFlush(p);
-            return;
-          }
-        } catch (e2) { log("layer2 requestPermission failed", e2); }
-      }
-      const h2 = await ensureFolderFor(key, true);
-      log("layer3 picked", h2.name, act());
-      await writeFile(h2, p.name, p.content);
-      await afterFlush(p);
-    } catch (e) {
-      log("flushParkedCore fallback error", e);
-      toast(`補存失敗：${e.message || e}`);
-    }
+    const pending = await getPending();
+    if (!pending.length) { toast("沒有待補存的逐字稿"); return; }
+    await savePending(pending[0]);
   }
 
-  async function afterFlush(p) {
-    await chrome.storage.local.remove("ttc_pending");
-    toast(`已存檔：${p.name}`);
-    lastFile = p.name;
-    updateStatus(true);
-    runBridge({ prompt: p.prompt });
-    renderUI();
-  }
-
-  /** One-click gesture flush for a write deferred during this page's life. */
-  function armGestureFlush() {
-    const flush = () => {
-      window.removeEventListener("click", flush, true);
-      flushParkedCore();
-    };
-    window.addEventListener("click", flush, { capture: true, once: true });
+  async function downloadPending() {
+    const pending = (await getPending())[0];
+    if (!pending) { toast("沒有待下載的逐字稿"); return; }
+    downloadFallback(pending.name, pending.content);
+    toast("已發出下載備份請求；暫存仍保留，請確認下載清單。");
   }
 
   async function pickFolder() {
     try {
-      const key = tenantKeyNow();
-      const h = await ensureFolderFor(key, true);
-      toast(`已選擇資料夾（${key}）：${h.name}`);
-      updateStatus();
-    } catch (e) {
-      toast("選擇資料夾取消或失敗：" + (e.message || e));
-    }
+      const result = await chrome.runtime.sendMessage({ type: "ttc-routing-status" });
+      if (!result?.ok) throw new Error(result?.error || "本機寫檔程式未連線");
+      const target = result.routes[routeNow()];
+      toast(target ? `${target.available ? "OneDrive 已連線" : "OneDrive 未掛載"}：${target.path}` : "請從旁邊的分流選單選擇 CDK 或 Tao");
+    } catch (error) { toast(error.message); }
   }
 
   async function runDiagnostics() {
@@ -797,8 +725,44 @@
       for (const el of document.querySelectorAll('[aria-live]')) grab(el, "aria-live");
       for (const el of document.querySelectorAll('[class*="Caption" i]')) grab(el, "class~Caption");
     } catch (_) {}
+    const captionButtons = deepQueryAll(document, 'button, [role="button"]')
+      .filter((el) => /caption|subtitle|字幕/i.test([el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("data-tid"), el.innerText, el.textContent].filter(Boolean).join(" ")))
+      .slice(0, 20)
+      .map((el) => ({
+        tid: el.getAttribute("data-tid") || "",
+        aria: el.getAttribute("aria-label") || "",
+        title: el.getAttribute("title") || "",
+        text: (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100),
+      }));
+    const controlButtons = deepQueryAll(document, 'button, [role="button"], [role="menuitem"]')
+      .filter((el) => !el.closest("#ttc-widget") && el.getClientRects().length > 0)
+      .slice(0, 80)
+      .map((el) => ({
+        tid: el.getAttribute("data-tid") || "",
+        aria: el.getAttribute("aria-label") || "",
+        title: el.getAttribute("title") || "",
+        text: (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim().slice(0, 100),
+      }));
+    let saveDiagnostics = { lastSave: lastSaveResult, pending: null };
+    try {
+      const stored = await chrome.storage.local.get(null);
+      saveDiagnostics = {
+        lastSave: lastSaveResult || stored.ttc_last_save || null,
+        pending: pendingItems(stored).map(p => ({ name: p.name, tenantKey: p.tenantKey, route: p.route, savedAt: p.savedAt })),
+      };
+    } catch (e) { saveDiagnostics.storageError = String(e.message || e); }
     const rep = {
+      version: VERSION,
+      loadedAt,
+      capturedAt: new Date().toISOString(),
       url: location.href,
+      document: { title: document.title, readyState: document.readyState, visibility: document.visibilityState },
+      meetingDetectedNow: isInMeetingRaw(),
+      tenant: { email: tenantEmail || null, key: tenantKeyNow(), folder: folderNow() },
+      routing: { selection: routeSelection, captureRoute, captureTenant },
+      saveDiagnostics,
+      controlButtons,
+      captionButtons,
       isTop,
       popup: !!window.opener, // meeting often opens as a popup window
       frames: Array.from(document.querySelectorAll("iframe")).map((f) => {
@@ -809,7 +773,7 @@
       topShadowHosts: (() => { let n = 0; try { for (const el of document.querySelectorAll("*")) if (el.shadowRoot) n++; } catch (_) {} return n; })(),
       selectors: Object.fromEntries(Object.entries({
         container: SEL.container, line: SEL.line, meetTitle: SEL.meetTitle,
-        captionsBtn: SEL.captionsBtn, rosterBtn: SEL.rosterBtn,
+        meetControl: SEL.meetControl, captionsBtn: SEL.captionsBtn, rosterBtn: SEL.rosterBtn,
       }).map(([k, sels]) => [k, sels.map((s) => ({ s, hit: (() => { try { return !!deepQueryOne(document, s); } catch (_) { return false; } })() }))])),
       fuzzy: fuzzy.slice(0, 12),
       counts: {
@@ -868,8 +832,7 @@
       }
       if (!folderReminded) {
         folderReminded = true;
-        const has = handles.get(tenantKeyNow());
-        if (!has) toast(`會議偵測成功，但此帳號還沒選資料夾 — 會議中或結束後按 📁 選擇（${tenantKeyNow()}）`);
+        if (!captureRoute) toast("尚未辨識存檔目的地 — 請在分流選單選擇 CDK 或 Tao");
       }
       // Kick captions; a separate interval keeps retrying while in meeting.
       tryEnableCaptions();
@@ -899,7 +862,7 @@
           capturing,
           auto: autoMode,
           lines: entries.size + bgLineCount,
-          folder: handles.get(tenantKeyNow())?.name || "",
+          folder: folderNow(),
           tenant: tenantEmail || tenantKeyNow(),
           lastFile,
           savedOk: !!savedOk,
@@ -950,7 +913,9 @@
       <button id="ttc-toggle" class="idle">● 開始擷取</button>
       <span id="ttc-count">0 行</span>
       <button id="ttc-flush" type="button" title="補存上次未存檔的逐字稿" style="display:none;background:#e65100">💾 補存</button>
-      <button id="ttc-folder" title="選擇 / 變更此帳號的 OneDrive 資料夾">📁</button>
+      <select id="ttc-route" aria-label="OneDrive 分流" title="此 Arc profile 的存檔目的地"><option value="auto">依 Teams 帳號</option><option value="cdk">CDK OneDrive</option><option value="tao">Tao OneDrive</option></select>
+      <button id="ttc-folder" title="檢查本機寫檔程式與 OneDrive 路徑">📁</button>
+      <button id="ttc-download" title="手動下載待補存逐字稿的備份" style="display:none">⬇ 備份</button>
       <button id="ttc-diag" type="button" title="診斷：DOM 結構報告（校正 selector 用）">🔍</button>
       <span id="ttc-tenant" title="偵測到的登入帳號"></span>
     `;
@@ -958,6 +923,13 @@
     ui.querySelector("#ttc-toggle").addEventListener("click", () => (capturing ? stop(false) : start(false)));
     ui.querySelector("#ttc-flush").addEventListener("click", () => flushParkedCore());
     ui.querySelector("#ttc-folder").addEventListener("click", () => pickFolder());
+    ui.querySelector("#ttc-download").addEventListener("click", () => downloadPending());
+    ui.querySelector("#ttc-route").addEventListener("change", async (event) => {
+      routeSelection = event.target.value;
+      await chrome.storage.local.set({ ttc_route: routeSelection });
+      toast(capturing ? "分流設定已記住，適用下一場會議；本場保留原目的地。" : "分流設定已記住，適用此 Arc profile。");
+      updateStatus();
+    });
     ui.querySelector("#ttc-diag").addEventListener("click", () => runDiagnostics());
     ui.querySelector("#ttc-auto").addEventListener("click", () => {
       autoMode = !autoMode;
@@ -1070,10 +1042,12 @@
     cnt.textContent = `${entries.size + bgLineCount} 行`;
     // Visible affordance: a parked transcript exists and still needs a home.
     let hasPending = false;
-    try { hasPending = !!(await chrome.storage.local.get("ttc_pending")).ttc_pending; } catch (_) {}
+    try { hasPending = (await getPending()).length > 0; } catch (_) {}
     const flushBtn = ui.querySelector("#ttc-flush");
     if (flushBtn) flushBtn.style.display = hasPending ? "" : "none";
-    tenantEl.textContent = tenantEmail || "";
+    ui.querySelector("#ttc-download").style.display = hasPending ? "" : "none";
+    ui.querySelector("#ttc-route").value = routeSelection;
+    tenantEl.textContent = `${tenantEmail || "未辨識帳號"} · ${ROUTES[routeNow()]?.label || "目的地待選擇"}`;
   }
 
   let toastTimer = null;
@@ -1100,7 +1074,7 @@
       if (msg?.type === "ttc-get-status") {
         sendResponse({
           capturing, auto: autoMode, lines: entries.size + bgLineCount,
-          folder: handles.get(tenantKeyNow())?.name || "",
+          folder: folderNow(),
           tenant: tenantEmail || tenantKeyNow(), lastFile,
         });
       }
@@ -1108,18 +1082,19 @@
     });
   } catch (_) {}
 
-  // Boot: restore handles + settings, then flush anything parked.
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && changes.ttc_route) {
+      routeSelection = validRoute(changes.ttc_route.newValue) ? changes.ttc_route.newValue : "auto";
+      updateStatus();
+    }
+  });
+
+  // Restore profile-local routing. Existing pending meetings keep their tenant.
   (async () => {
+    detectTenant();
     try {
-      const legacy = await idbGet("dir");
-      if (legacy) handles.set("default", legacy);
-      detectTenant();
-      const key = tenantKeyNow();
-      const stored = await idbGet(storeKeyFor(key));
-      if (stored) handles.set(key, stored);
-    } catch (_) {}
-    try {
-      const res = await chrome.storage?.local.get(["ttc_auto", "ttc_copilot_url"]);
+      const res = await chrome.storage?.local.get(["ttc_auto", "ttc_copilot_url", "ttc_route"]);
+      if (validRoute(res?.ttc_route)) routeSelection = res.ttc_route;
       if (res && typeof res.ttc_auto === "boolean") autoMode = res.ttc_auto;
       if (res && typeof res.ttc_copilot_url === "string" && res.ttc_copilot_url) copilotUrl = res.ttc_copilot_url;
     } catch (_) {}
@@ -1129,5 +1104,5 @@
 
   const boot = () => { if (document.body) injectUI(); else setTimeout(boot, 500); };
   boot();
-  log("content script loaded (v0.2.1)");
+  log(`content script loaded (v${VERSION})`);
 })();
