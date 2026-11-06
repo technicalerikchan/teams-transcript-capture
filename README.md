@@ -1,89 +1,81 @@
-# Teams Transcript Capture
+# Teams Transcript Capture — v0.4.0
 
-一個極簡的 Chrome 擴充（MV3），**自動**擷取**網頁版 Microsoft Teams** 的即時字幕（live captions），會議結束自動把逐字稿存成 Markdown，寫進你指定的 **OneDrive 同步資料夾**，由 OneDrive 自動上傳到雲端；存檔後自動開啟 M365 Copilot 分頁並複製會議記錄 prompt，貼上送出即得英文會議記錄。
+擷取網頁版 Microsoft Teams 的 **即時字幕文字**，會議結束後將 Markdown 逐字稿存入對應 OneDrive 資料夾。**不錄製音訊／影片，也不會啟動 Teams 官方錄影。**
 
-- 只抓**文字**（字幕），不錄音、不錄影。
-- **AUTO 模式**（預設開）：偵測到進入會議 → 自動開字幕、自動開始擷取；偵測到離開 → 自動存檔。
-- **跨 frame / Shadow DOM**：字幕在 iframe 或 shadow root 裡也抓得到（各 frame 經 background 彙整，任一 frame 都能完成存檔）。
-- **上一場不污染下一場**：每場會議開始時清空跨 frame 彙整區；未存檔的逐字稿暫存於 chrome.storage，不會混入下一場。
-- **會議感知命名**：1:1 會議以對方名字命名（`人名_日期_時間.md`），多人會議以會議標題命名。
-- **多租戶路由**：依頁面登入帳號（電子郵件網域）自動寫入對應租戶的資料夾；**每個租戶第一次必須按 📁 各授權一次**（會議中就會提醒）。
-- **Copilot 全自動（v0.3）**：存檔後自動開 Copilot 分頁，**自動貼上 prompt 並按送出**（紫色角落徽章顯示進度；失敗自動重試 5 次，仍失敗退回「剪貼簿+手動貼上」模式）。minutes 生成後請存到同資料夾的 `minutes/`。
-- **🔍 診斷**：若行數 0 或行為異常，按 🔍 會把 DOM 結構報告複製到剪貼簿（並印在 console），貼給 Claude 校正 selector。
+## OneDrive 自動分流
 
-## 安裝（load unpacked）
+v0.4.0 改用本機 Native Messaging 寫檔程式，避開 macOS OneDrive File Provider 與瀏覽器 File System Access API 的寫入問題，不再自動降級存到 Downloads。
 
-1. Chrome 開 `chrome://extensions`
-2. 右上角開啟 **Developer mode（開發人員模式）**
-3. 按 **Load unpacked（載入未封裝項目）**
-4. 選擇這個資料夾（含 `manifest.json` 的那層）
+固定目的地（相對使用者家目錄）：
 
-安裝後，開啟 `https://teams.microsoft.com`，右下角會出現浮動按鈕。
-
-## 使用
-
-1. 在 Teams 會議中，手動開啟 **live captions（即時字幕）**：`More → Language and speech → Turn on live captions`。
-2. 按右下角 **📁** 選擇要存放的 OneDrive 資料夾（第一次會跳出選擇對話框；之後記住）。
-3. 按 **● 開始擷取**。
-4. 結束時按 **■ 停止並存檔** —— 逐字稿會寫進剛選的資料夾。
-
-檔名：`會議標題_YYYY-MM-DD_HHMM.md`；偵測不到標題時退回 `TeamsTranscript_YYYY-MM-DD_HHMM.md`。
-
-輸出格式：
-```
-# Teams Transcript
-
-- 會議：<標題>
-- 日期：…
-- 擷取開始 / 結束：…
-- 對話行數：…
-
----
-
-[HH:MM:SS] 講者：內容
-[HH:MM:SS] 講者：內容
-```
-
-工具列圖示點開的 popup 顯示即時狀態（擷取中 / 行數 / 目標資料夾 / 最後存檔）。
-
-### 移動浮動面板
-
-- 拖曳面板左側的 **⠿** 小把手，即可在網頁可視範圍內移動；原本的擷取與資料夾按鈕維持不變。
-- 最後位置儲存在擴充功能的本機儲存空間，重新整理網頁後會還原。
-- 視窗縮小或面板大小改變時，面板會自動移回最近的可視邊界。
-- 也可以用 Tab 聚焦把手，再按方向鍵微調位置。
-
-### 在 Arc 更新已載入的擴充功能
-
-1. 若正在擷取，先按 **停止並存檔**，確認逐字稿已儲存。
-2. 在 Arc 開啟 `chrome://extensions`，開啟 **Developer mode（開發人員模式）**。
-3. 找到 **Teams Transcript Capture**，按該擴充功能的 **重新載入（Reload）**。
-4. 回到 Teams 分頁，重新整理網頁，讓新版面板載入。
-5. 拖曳把手後重新整理，確認位置保留；縮小視窗，確認面板仍在可視範圍內。
-
-## Calibration（重要）
-
-Teams 的字幕 DOM 沒有公開文件，且會隨版本改變。若擷取結果為空或亂碼，需要校正 `content.js` 最上方的 `SEL` 選擇器：
-
-1. 開一場真的有 live captions 的 Teams 會議。
-2. 對著一行字幕按右鍵 → **檢查（Inspect）**。
-3. 找出：字幕**容器**、單行**字幕**、**講者**名稱、**文字**內容各自的 selector（`data-tid` 或 class）。
-4. 把它們填進 `SEL.container / line / speaker / text` 的陣列最前面（保留其他當 fallback）。
-5. 在 `chrome://extensions` 按這個擴充的**重新整理**，回 Teams 分頁重試。
-
-## 已知限制（v1 non-goals）
-
-- 不錄音 / 不錄影；不抓 Teams 官方 transcript（那需要 Graph API）。
-- 不會自動幫你開字幕，要自己開。
-- 沒有逐字稿編輯器 / 即時翻譯 / AI 摘要。
-- 一次一場會議（不支援多分頁同時擷取）。
-- 需要桌面版 Chrome（File System Access API）。
-- FSA 目標資料夾權限在每個瀏覽器工作階段可能會再確認一次（按一下即可）。
-
-## 檔案
-
-| 檔案 | 作用 |
+| 分流 | 目的地 |
 |---|---|
-| `manifest.json` | MV3 設定 |
-| `content.js` | 注入浮動按鈕、擷取字幕、寫檔 |
-| `popup.html` / `popup.js` | 工具列狀態視窗 |
+| CDK | `~/Library/CloudStorage/OneDrive-CDKGlobalLLC/transcript` |
+| Tao | `~/Library/CloudStorage/OneDrive-TaoDigitalSolutionsInc/transcript` |
+
+### 在 Arc 設定一次
+
+1. 停止現有擷取並確認存檔。到 `chrome://extensions` 重新載入此目錄的擴充功能，確認版本 **0.4.0**，並允許新增的 `nativeMessaging` 權限。
+2. CDK workspace：點擴充功能圖示，將 **OneDrive 分流** 選為 **固定存入 CDK OneDrive**。
+3. TaoDigital workspace：同樣選為 **固定存入 Tao OneDrive**。
+4. 在兩邊各按 **測試 OneDrive 連線**，確認顯示正確路徑及已掛載。
+5. 重新整理 Teams 分頁，面板也有相同的分流選單與 📁 連線檢查。
+
+Arc 沒有供此擴充功能使用的 workspace 名稱 API，設定是儲存在 **Arc profile**，不是依目前作用中的 workspace 猜測。此機的 CDK 和 TaoDigital 使用不同 profile，因此可各自設定一次。同一 profile 的其他 workspace 會共用設定。
+
+「依 Teams 帳號自動辨識」模式接受 `cdk.com`／`taodigitalsolutions.com`，不使用聊天或參與者的 email。若找不到明確帳號或有多個帳號，需手動選擇分流；不會猜測目的地。建議此機採用固定 profile 分流。
+
+每場開始擷取時固定目的地；中途更改分流設定適用下一場。補存舊稿優先使用該稿原本的目的地／帳號網域，避免補存至另一家公司。
+
+### 安裝本機寫檔程式
+
+擴充功能 ID 可在 `chrome://extensions` 的開發人員模式下取得。本目錄在此機的 ID 為 `klhggdgabghfgeaapigeihkmmeinjokn`。
+
+```bash
+cd /Users/Erik.Chan/Desktop/teams-transcript-capture-main
+python3 native/install.py --extension-id klhggdgabghfgeaapigeihkmmeinjokn
+```
+
+安裝位置：`~/.local/share/teams-transcript-capture/`。安裝程式在使用者層級的 Arc／Chrome NativeMessagingHosts 目錄註冊 host，不會修改瀏覽器 profile 設定。若搬動擴充功能資料夾導致 ID 改變，請重新安裝 host，指定新 ID。
+
+- 本機程式由瀏覽器按需啟動，無網路服務、沒有常駐監看 Downloads。
+- 只允許指定的 extension origin；只提供兩個固定目的地，拒絕任意路徑、檔名路徑穿越及覆寫既有不同內容。
+- 檔案本機寫入成功不代表雲端同步已完成；OneDrive 用戶端仍須正常運作。
+- 同名但不同內容會另存為 `名稱 (1).md`；同內容重試不重複建立。
+- 若 OneDrive 根目錄不存在，會保留暫存並報錯，不會建立假的 OneDrive 根目錄。
+
+## 擷取與補存
+
+- **AUTO** 預設開啟，偵測會議後自動開始；即時字幕若未能自動開啟，請在 Teams 的 More → Language and speech → Turn on live captions 開啟。
+- **● 開始擷取 / ■ 停止並存檔** 可手動操作。字幕行數增加才表示有收到內容。
+- **💾 補存**：逐一補存未完成的稿件。每份稿件有獨立暫存，不會因開始下一場而覆寫上一份待存稿。
+- **⬇ 備份**：只有手動按此按鈕才要求瀏覽器下載備份。下載請求不代表檔案已成功寫入；不會因此刪除暫存。
+- **📁**：檢查本機寫檔程式及目的地；不再要求重複授權 OneDrive FSA handle。
+- 拖曳 **⠿** 可移動面板；位置保存在 profile 本機 storage，方向鍵也可微調。
+
+擷取名稱依會議標題或 1:1 對象命名為 `會議_YYYY-MM-DD_HHMM.md`，並建立 `minutes/` 資料夾。存檔後既有的 M365 Copilot 橋接會另開分頁、傳遞 prompt 以產生英文 minutes；這與本機寫檔是分開的行為。
+
+請在 `chrome://extensions` 檢查是否另有從 `~/teams-transcript-capture` 載入的舊版本，若有請停用舊版，避免兩份擴充功能同時擷取／開 Copilot。
+
+## 診斷
+
+在 **實際會議視窗內、尚未離開會議時** 按 🔍。報告包含：
+
+- 版本、載入／診斷時間、會議控制按鈕與 DOM 選擇器命中情況。
+- `routing.selection`、`captureRoute` 及 `captureTenant`。
+- `saveDiagnostics.lastSave` 的結果／錯誤，以及待補存的檔名／路由清單；不含暫存逐字稿或 prompt 正文。
+
+`events: []` 只代表此分頁自載入後沒有偵測到會議，不能證明另一個視窗是否正在開會。Teams DOM 會隨版本變動；目前不保證所有租戶的字幕按鈕都能自動開啟。若行數不增加，請開啟字幕後在會議視窗提供診斷。
+
+已知限制：一次一場會議，尚未支援同一 profile 中多分頁同時擷取。跨 frame 字幕由 background 彙整。
+
+## 測試
+
+```bash
+node --test tests/*.test.cjs
+python3 -m unittest discover -s tests -p 'test_*.py'
+node --check content.js
+node --check background.js
+```
+
+Node 測試以瀏覽器 mock 驗證路由、待存稿保留與錯誤流程；Python 測試驗證寫檔與路徑限制。瀏覽器 Native Messaging 連線仍須在重新載入後按「測試 OneDrive 連線」確認。

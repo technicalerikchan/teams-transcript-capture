@@ -13,6 +13,9 @@
     .idle{background:#2e7d32}
     .hint{margin-top:10px;padding:8px;background:#f3f3f3;border-radius:6px;color:#444;line-height:1.5}
     code{background:#e8e8e8;padding:1px 4px;border-radius:3px}
+    .v{max-width:175px;overflow-wrap:anywhere;text-align:right}
+    select,button{width:100%;margin-top:8px;padding:6px;box-sizing:border-box}
+    #routing-result{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:8px}
   </style>
 </head>
 <body>
@@ -25,9 +28,14 @@
   <div class="hint">
     用頁面右下角的浮動按鈕操作：<br />
     ● <b>開始擷取</b> / ■ <b>停止並存檔</b><br />
-    📁 選擇 / 變更 OneDrive 資料夾<br />
+    📁 檢查本機寫檔連線<br />
     ⚠️ 請先在 Teams 開啟 <b>live captions（即時字幕）</b>。
   </div>
+  <label for="route">OneDrive 分流（此 Arc profile）</label>
+  <select id="route"><option value="auto">依 Teams 帳號自動辨識</option><option value="cdk">固定存入 CDK OneDrive</option><option value="tao">固定存入 Tao OneDrive</option></select>
+  <button id="check-routing">測試 OneDrive 連線</button>
+  <div id="routing-result" role="status"></div>
+  <script src="routing.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>
